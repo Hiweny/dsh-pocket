@@ -1,0 +1,133 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/setup_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/window_bg">
+
+    <ScrollView
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:fillViewport="true"
+        android:scrollbars="none">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="vertical"
+            android:paddingLeft="26dp"
+            android:paddingTop="40dp"
+            android:paddingRight="26dp"
+            android:paddingBottom="40dp">
+
+            <ImageView
+                android:id="@+id/logo"
+                android:layout_width="56dp"
+                android:layout_height="56dp"
+                android:contentDescription="@string/app_name"
+                android:src="@drawable/ic_whale"
+                android:tint="@color/text_primary" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="20dp"
+                android:text="@string/setup_title"
+                android:textColor="@color/text_primary"
+                android:textSize="26sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:layout_marginBottom="28dp"
+                android:text="@string/setup_subtitle"
+                android:textColor="@color/text_secondary"
+                android:textSize="14sp" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="52dp"
+                android:orientation="horizontal">
+
+                <EditText
+                    android:id="@+id/url_input"
+                    android:layout_width="0dp"
+                    android:layout_height="match_parent"
+                    android:layout_weight="1"
+                    android:background="@drawable/bg_input"
+                    android:hint="@string/setup_url_hint"
+                    android:imeOptions="actionNext"
+                    android:importantForAutofill="no"
+                    android:inputType="textUri"
+                    android:paddingLeft="16dp"
+                    android:paddingRight="16dp"
+                    android:singleLine="true"
+                    android:textColor="@color/text_primary"
+                    android:textColorHint="@color/text_secondary"
+                    android:textSize="15sp" />
+
+                <ImageView
+                    android:id="@+id/scan_btn"
+                    android:layout_width="52dp"
+                    android:layout_height="52dp"
+                    android:layout_marginLeft="10dp"
+                    android:background="@drawable/bg_input"
+                    android:contentDescription="@string/setup_scan"
+                    android:padding="14dp"
+                    android:src="@drawable/ic_scan"
+                    android:tint="@color/text_primary" />
+            </LinearLayout>
+
+            <EditText
+                android:id="@+id/pin_input"
+                android:layout_width="match_parent"
+                android:layout_height="52dp"
+                android:layout_marginTop="12dp"
+                android:background="@drawable/bg_input"
+                android:hint="@string/setup_pin_hint"
+                android:imeOptions="actionDone"
+                android:importantForAutofill="no"
+                android:inputType="textPassword"
+                android:paddingLeft="16dp"
+                android:paddingRight="16dp"
+                android:singleLine="true"
+                android:textColor="@color/text_primary"
+                android:textColorHint="@color/text_secondary"
+                android:textSize="15sp" />
+
+            <TextView
+                android:id="@+id/error_text"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:textColor="@color/error"
+                android:textSize="13sp"
+                android:visibility="gone" />
+
+            <TextView
+                android:id="@+id/enter_btn"
+                android:layout_width="match_parent"
+                android:layout_height="52dp"
+                android:layout_marginTop="22dp"
+                android:background="@drawable/bg_button"
+                android:clickable="true"
+                android:focusable="true"
+                android:gravity="center"
+                android:text="@string/setup_enter"
+                android:textColor="#FFFFFFFF"
+                android:textSize="16sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="18dp"
+                android:text="@string/setup_tip"
+                android:textColor="@color/text_secondary"
+                android:textSize="12sp" />
+        </LinearLayout>
+    </ScrollView>
+</FrameLayout>

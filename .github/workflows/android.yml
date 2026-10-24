@@ -1,0 +1,91 @@
+name: Android APK
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      KEYSTORE_B64: ${{ secrets.DSH_KEYSTORE_BASE64 }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Set up Android SDK
+        run: |
+          SDK_ROOT="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          echo "SDK_ROOT=$SDK_ROOT"
+          yes | "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
+          "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" "platforms;android-34" "build-tools;34.0.0" > /dev/null
+
+      - name: Decode signing key
+        if: env.KEYSTORE_B64 != ''
+        env:
+          KSPASS: ${{ secrets.DSH_KEYSTORE_PASSWORD }}
+          KSALIAS: ${{ secrets.DSH_KEY_ALIAS }}
+          KEYPASS: ${{ secrets.DSH_KEY_PASSWORD }}
+        run: |
+          printf '%s' "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/dsh.jks"
+          echo "DSH_KEYSTORE=$RUNNER_TEMP/dsh.jks" >> "$GITHUB_ENV"
+          echo "DSH_KEYSTORE_PASSWORD=$KSPASS" >> "$GITHUB_ENV"
+          echo "DSH_KEY_ALIAS=$KSALIAS" >> "$GITHUB_ENV"
+          echo "DSH_KEY_PASSWORD=$KEYPASS" >> "$GITHUB_ENV"
+
+      - name: Build release APK
+        working-directory: android
+        run: |
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            export DSH_VERSION_NAME="${GITHUB_REF_NAME#v}"
+          else
+            export DSH_VERSION_NAME="1.0.0-${GITHUB_RUN_NUMBER}"
+          fi
+          export DSH_VERSION_CODE="$GITHUB_RUN_NUMBER"
+          echo "versionName=$DSH_VERSION_NAME versionCode=$DSH_VERSION_CODE"
+          gradle assembleRelease --no-daemon --stacktrace
+          mkdir -p out
+          cp app/build/outputs/apk/release/app-release.apk "out/DSHPocket-$DSH_VERSION_NAME.apk"
+          cp app/build/outputs/apk/release/app-release.apk out/DSHPocket.apk
+          ls -lh out
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DSH-Pocket-APK
+          path: android/out/*.apk
+          if-no-files-found: error
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            android/out/DSHPocket.apk
+            android/out/DSHPocket-${{ github.ref_name }}.apk
+          generate_release_notes: true
+          body: |
+            DSH Pocket Android 客户端（WebView 壳，配合 dsh-pocket 插件使用）。
+
+            安装后填入电脑上「设置 → 手机访问」里的地址（或扫码），
+            输入访问密码即可全屏使用；密码会记住，下次直接进入。

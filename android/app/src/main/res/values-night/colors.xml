@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 深色 -->
+    <color name="window_bg">#FF101014</color>
+    <color name="accent">#FF4D6BFE</color>
+    <color name="ic_launcher_background">#FFFFFFFF</color>
+    <color name="input_bg">#FF1A1B21</color>
+    <color name="input_stroke">#FF2A2C35</color>
+    <color name="text_primary">#FFEDEEF2</color>
+    <color name="text_secondary">#FF8A8D99</color>
+    <color name="error">#FFFF6B6B</color>
+</resources>

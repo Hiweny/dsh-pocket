@@ -1,0 +1,687 @@
+package com.hiweny.dshpocket
+
+import android.Manifest
+import android.annotation.SuppressLint
+import android.app.DownloadManager
+import android.content.Context
+import android.content.Intent
+import android.content.res.ColorStateList
+import android.graphics.Color
+import android.graphics.drawable.ColorDrawable
+import android.net.Uri
+import android.os.Build
+import android.os.Bundle
+import android.os.Environment
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
+import android.util.Log
+import android.view.Gravity
+import android.view.View
+import android.view.ViewGroup
+import android.view.WindowManager
+import android.webkit.CookieManager
+import android.webkit.JavascriptInterface
+import android.webkit.RenderProcessGoneDetail
+import android.webkit.URLUtil
+import android.webkit.WebChromeClient
+import android.webkit.WebResourceRequest
+import android.webkit.WebSettings
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import android.widget.FrameLayout
+import android.widget.ImageView
+import android.widget.LinearLayout
+import android.widget.TextView
+import android.widget.Toast
+import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsAnimationCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
+import androidx.webkit.WebViewCompat
+import androidx.webkit.WebViewFeature
+import java.io.BufferedReader
+
+/**
+ * 主界面：一个全屏沉浸的 WebView，页面就是 dsh-pocket 的手机入口。
+ *
+ * 设计约束（按需求）：
+ *  - 不额外加任何常驻按钮，全屏只有页面本身；
+ *  - 顶部/底部不能出现白线：窗口、WebView、页面三层底色始终同步；
+ *  - 键盘弹起时页面要跟着「撑起来」，并且是跟随系统动画平滑变化；
+ *  - 冷启动不闪白：用上次页面底色做启动窗口底色 + 同色加载遮罩。
+ */
+class MainActivity : AppCompatActivity() {
+
+    companion object {
+        private const val TAG = "DSHPocket"
+        private const val REQ_NOTIF = 1001
+        private const val OVERLAY_FADE_MS = 150L
+
+        /** 配置页改完地址后带回来，让当前 WebView 重新加载。 */
+        const val EXTRA_RELOAD = "dsh_reload"
+    }
+
+    private lateinit var prefs: Prefs
+    private lateinit var root: FrameLayout
+    private var webView: WebView? = null
+    private var loadingOverlay: View? = null
+    private var errorOverlay: View? = null
+    private var hotspot: View? = null
+
+    private var bgColor: Int = 0
+    private var insetTop = 0
+    private var insetBottom = 0
+    private var imeBottom = 0
+    private var resumed = false
+    private var lastBackAt = 0L
+    private val handler = Handler(Looper.getMainLooper())
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        prefs = Prefs(this)
+        if (!prefs.configured) {
+            startActivity(Intent(this, SetupActivity::class.java))
+            finish()
+            return
+        }
+
+        bgColor = if (prefs.lastBg != 0) prefs.lastBg
+        else ContextCompat.getColor(this, R.color.window_bg)
+
+        setupWindow()
+        root = FrameLayout(this)
+        root.setBackgroundColor(bgColor)
+        setContentView(root)
+
+        ViewCompat.setOnApplyWindowInsetsListener(root) { _, insets ->
+            readInsets(insets)
+            applyInsets()
+            insets
+        }
+        setupImeAnimation()
+
+        showLoadingOverlay()
+        createWebView()
+        loadTarget()
+        maybeAskNotificationPermission()
+    }
+
+    /* ---------------------------- 窗口 / 沉浸式 ---------------------------- */
+
+    private fun setupWindow() {
+        window.setBackgroundDrawable(ColorDrawable(bgColor))
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        val controller = WindowInsetsControllerCompat(window, window.decorView)
+        controller.hide(WindowInsetsCompat.Type.systemBars())
+        controller.systemBarsBehavior =
+            WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            window.attributes.layoutInDisplayCutoutMode =
+                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            // 关掉系统给透明系统栏自动加的对比度底衬 —— 那层底衬在深色页面上
+            // 会表现为一条灰白细线。
+            window.isStatusBarContrastEnforced = false
+            window.isNavigationBarContrastEnforced = false
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            // Android 11+：窗口不因 IME 自行 resize，改由 insets 逐帧驱动，
+            // 这样键盘动画与页面高度变化是同一帧完成的，不会二次跳动。
+            window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING)
+        } else {
+            window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+        }
+    }
+
+    private fun readInsets(insets: WindowInsetsCompat) {
+        val cut = insets.getInsets(WindowInsetsCompat.Type.displayCutout()).top
+        val status = insets.getInsets(WindowInsetsCompat.Type.statusBars()).top
+        insetTop = maxOf(cut, status)
+        val nav = insets.getInsets(WindowInsetsCompat.Type.navigationBars()).bottom
+        val gesture = insets.getInsets(WindowInsetsCompat.Type.systemGestures()).bottom
+        insetBottom = maxOf(nav, gesture)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            imeBottom = insets.getInsets(WindowInsetsCompat.Type.ime()).bottom
+        }
+    }
+
+    /** 把安全区/键盘高度应用到 WebView 外边距（而不是 padding，避免内容溢出绘制）。 */
+    private fun applyInsets() {
+        val wv = webView ?: return
+        val lp = wv.layoutParams as? FrameLayout.LayoutParams ?: return
+        val newTop = insetTop
+        val newBottom = maxOf(insetBottom, imeBottom)
+        if (lp.topMargin == newTop && lp.bottomMargin == newBottom) return
+        lp.topMargin = newTop
+        lp.bottomMargin = newBottom
+        wv.layoutParams = lp
+
+        hotspot?.let { spot ->
+            val hlp = spot.layoutParams as? FrameLayout.LayoutParams ?: return@let
+            if (hlp.height != newTop) {
+                hlp.height = newTop
+                spot.layoutParams = hlp
+                spot.visibility = if (newTop > 0) View.VISIBLE else View.GONE
+            }
+        }
+    }
+
+    private fun setupImeAnimation() {
+        ViewCompat.setWindowInsetsAnimationCallback(
+            root,
+            object : WindowInsetsAnimationCompat.Callback(DISPATCH_MODE_CONTINUE_ON_SUBTREE) {
+                override fun onProgress(
+                    insets: WindowInsetsCompat,
+                    runningAnimations: MutableList<WindowInsetsAnimationCompat>
+                ): WindowInsetsCompat {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                        val h = insets.getInsets(WindowInsetsCompat.Type.ime()).bottom
+                        if (h != imeBottom) {
+                            imeBottom = h
+                            applyInsets()
+                        }
+                    }
+                    return insets
+                }
+
+                override fun onEnd(animation: WindowInsetsAnimationCompat) {
+                    super.onEnd(animation)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                        val h = ViewCompat.getRootWindowInsets(root)
+                            ?.getInsets(WindowInsetsCompat.Type.ime())?.bottom ?: 0
+                        if (h != imeBottom) {
+                            imeBottom = h
+                            applyInsets()
+                        }
+                    }
+                }
+            }
+        )
+    }
+
+    /* ---------------------------- WebView ---------------------------- */
+
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun createWebView() {
+        val wv = WebView(this)
+        wv.layoutParams = FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT
+        )
+        wv.setBackgroundColor(bgColor)
+        wv.overScrollMode = View.OVER_SCROLL_NEVER
+        wv.isHorizontalScrollBarEnabled = false
+        wv.scrollBarStyle = View.SCROLLBARS_INSIDE_OVERLAY
+        wv.isVerticalScrollBarEnabled = true
+
+        wv.settings.apply {
+            javaScriptEnabled = true
+            domStorageEnabled = true
+            databaseEnabled = true
+            useWideViewPort = true
+            loadWithOverviewMode = false
+            setSupportZoom(false)
+            builtInZoomControls = false
+            displayZoomControls = false
+            // 固定文本缩放：系统字号放大不会让页面按 1.3x 重排（那是移动端卡顿/错位的常见来源）
+            textZoom = 100
+            mediaPlaybackRequiresUserGesture = false
+            javaScriptCanOpenWindowsAutomatically = true
+            cacheMode = WebSettings.LOAD_DEFAULT
+            allowFileAccess = false
+            allowContentAccess = false
+            setGeolocationEnabled(false)
+            mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+            setSupportMultipleWindows(false)
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            // 后台也保持渲染进程优先级：agent 在跑的时候页面要能持续收流式数据
+            wv.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false)
+        }
+
+        CookieManager.getInstance().setAcceptCookie(true)
+        CookieManager.getInstance().setAcceptThirdPartyCookies(wv, true)
+        WebView.setWebContentsDebuggingEnabled(false)
+
+        wv.addJavascriptInterface(WebBridge(), "DSHPocket")
+
+        wv.webViewClient = object : WebViewClient() {
+            override fun onPageCommitVisible(view: WebView, url: String) {
+                hideLoadingOverlay()
+            }
+
+            override fun onPageFinished(view: WebView, url: String) {
+                hideLoadingOverlay()
+                hideErrorOverlay()
+                injectFallback(view)
+                prefs.lastHost = Uri.parse(prefs.baseUrl).host ?: ""
+                CookieManager.getInstance().flush()
+            }
+
+            override fun shouldOverrideUrlLoading(
+                view: WebView,
+                request: WebResourceRequest
+            ): Boolean = handleExternal(request.url)
+
+            override fun onReceivedError(
+                view: WebView,
+                request: WebResourceRequest,
+                error: android.webkit.WebResourceError
+            ) {
+                if (request.isForMainFrame) {
+                    showErrorOverlay(error.description?.toString())
+                }
+            }
+
+            override fun onRenderProcessGone(
+                view: WebView,
+                detail: RenderProcessGoneDetail
+            ): Boolean {
+                Log.w(TAG, "renderer gone, crashed=${detail.didCrash()}")
+                recoverWebView()
+                return true
+            }
+        }
+
+        wv.webChromeClient = object : WebChromeClient() {
+            override fun onProgressChanged(view: WebView, newProgress: Int) {
+                if (newProgress >= 90) hideLoadingOverlay()
+            }
+        }
+
+        wv.setDownloadListener { url, userAgent, contentDisposition, mimeType, _ ->
+            startDownload(url, userAgent, contentDisposition, mimeType)
+        }
+
+        webView = wv
+        root.addView(wv, 0)
+        applyInsets()
+        injectDocumentStart(wv)
+        addTopHotspot()
+    }
+
+    private fun injectDocumentStart(wv: WebView) {
+        val js = readAsset("inject.js")
+        if (js.isBlank()) return
+        try {
+            if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
+                // document-start 注入：能赶在页面脚本之前 hook WebSocket
+                WebViewCompat.addDocumentStartJavaScript(wv, js, setOf("*"))
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "doc-start inject failed: ${e.message}")
+        }
+    }
+
+    /** 老内核（不支持 document-start）兜底：页面加载完再注入一次，脚本自身幂等。 */
+    private fun injectFallback(wv: WebView) {
+        val js = readAsset("inject.js")
+        if (js.isBlank()) return
+        try {
+            wv.evaluateJavascript(js, null)
+        } catch (e: Exception) {
+            Log.w(TAG, "fallback inject failed: ${e.message}")
+        }
+    }
+
+    private fun recoverWebView() {
+        val old = webView
+        webView = null
+        try {
+            root.removeView(old)
+            old?.destroy()
+        } catch (e: Exception) {
+            Log.w(TAG, "destroy failed: ${e.message}")
+        }
+        showLoadingOverlay()
+        createWebView()
+        loadTarget()
+    }
+
+    /* ---------------------------- 加载 ---------------------------- */
+
+    private fun loadTarget() {
+        val base = prefs.baseUrl.trim().trimEnd('/')
+        if (base.isEmpty()) {
+            startActivity(Intent(this, SetupActivity::class.java))
+            finish()
+            return
+        }
+        val pin = prefs.pin.trim()
+        val url = if (pin.isEmpty()) {
+            base
+        } else {
+            val sep = if (base.contains('?')) "&" else "?"
+            base + sep + "token=" + Uri.encode(pin)
+        }
+        try {
+            webView?.loadUrl(url)
+        } catch (e: Exception) {
+            showErrorOverlay(e.message)
+        }
+    }
+
+    /**
+     * 只有和配置地址同 host 的导航留在壳里，其余交给系统浏览器，
+     * 并且剥掉 token 参数，避免访问密码被带到第三方站点。
+     */
+    private fun handleExternal(url: Uri): Boolean {
+        val scheme = url.scheme?.lowercase() ?: return false
+        if (scheme == "about" || scheme == "blob" || scheme == "data" || scheme == "javascript") {
+            return false
+        }
+        val host = url.host
+        val mine = Uri.parse(prefs.baseUrl).host
+        if (host == null || mine == null || host.equals(mine, ignoreCase = true)) return false
+
+        val builder = url.buildUpon().clearQuery()
+        runCatching {
+            url.queryParameterNames.forEach { name ->
+                if (name != "token" && name != "pin" && name != "password") {
+                    builder.appendQueryParameter(name, url.getQueryParameter(name))
+                }
+            }
+        }
+        try {
+            startActivity(Intent(Intent.ACTION_VIEW, builder.build()))
+        } catch (e: Exception) {
+            Log.w(TAG, "no browser: ${e.message}")
+        }
+        return true
+    }
+
+    private fun startDownload(url: String, ua: String, disposition: String, mime: String) {
+        if (!url.startsWith("http")) return
+        try {
+            val name = URLUtil.guessFileName(url, disposition, mime)
+            val req = DownloadManager.Request(Uri.parse(url)).apply {
+                setMimeType(mime)
+                addRequestHeader("User-Agent", ua)
+                CookieManager.getInstance().getCookie(url)?.let {
+                    addRequestHeader("Cookie", it)
+                }
+                setNotificationVisibility(
+                    DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED
+                )
+                setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, name)
+            }
+            (getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager).enqueue(req)
+            Toast.makeText(this, "开始下载 $name", Toast.LENGTH_SHORT).show()
+        } catch (e: Exception) {
+            Log.w(TAG, "download failed: ${e.message}")
+            Toast.makeText(this, "下载失败", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    /* ---------------------------- 遮罩层 ---------------------------- */
+
+    private fun showLoadingOverlay() {
+        if (loadingOverlay != null) return
+        val box = FrameLayout(this)
+        box.setBackgroundColor(bgColor)
+        val img = ImageView(this)
+        img.setImageResource(R.drawable.ic_whale)
+        img.imageTintList = ColorStateList.valueOf(
+            ContextCompat.getColor(this, R.color.text_secondary)
+        )
+        img.alpha = 0.35f
+        box.addView(
+            img,
+            FrameLayout.LayoutParams(dp(40), dp(40), Gravity.CENTER)
+        )
+        loadingOverlay = box
+        root.addView(
+            box,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        )
+    }
+
+    private fun hideLoadingOverlay() {
+        val box = loadingOverlay ?: return
+        loadingOverlay = null
+        box.animate().alpha(0f).setDuration(OVERLAY_FADE_MS).withEndAction {
+            runCatching { root.removeView(box) }
+        }.start()
+    }
+
+    private fun showErrorOverlay(detail: String?) {
+        if (errorOverlay != null) return
+        hideLoadingOverlay()
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            setBackgroundColor(bgColor)
+            setPadding(dp(32), dp(32), dp(32), dp(32))
+        }
+        val title = TextView(this).apply {
+            text = "连不上这个地址"
+            setTextColor(ContextCompat.getColor(this@MainActivity, R.color.text_primary))
+            textSize = 18f
+            gravity = Gravity.CENTER
+        }
+        val desc = TextView(this).apply {
+            text = (detail ?: "").ifBlank { "请确认电脑上的 dsh web 正在运行，并且手机和电脑在同一个网络。" }
+            setTextColor(ContextCompat.getColor(this@MainActivity, R.color.text_secondary))
+            textSize = 13f
+            gravity = Gravity.CENTER
+            setPadding(0, dp(10), 0, dp(24))
+        }
+        val btn = TextView(this).apply {
+            text = "检查地址"
+            setTextColor(Color.WHITE)
+            textSize = 15f
+            gravity = Gravity.CENTER
+            background = ContextCompat.getDrawable(this@MainActivity, R.drawable.bg_button)
+            setPadding(dp(28), dp(12), dp(28), dp(12))
+            setOnClickListener {
+                startActivity(Intent(this@MainActivity, SetupActivity::class.java))
+            }
+        }
+        box.addView(title)
+        box.addView(desc)
+        box.addView(btn)
+        errorOverlay = box
+        root.addView(
+            box,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        )
+    }
+
+    private fun hideErrorOverlay() {
+        val box = errorOverlay ?: return
+        errorOverlay = null
+        runCatching { root.removeView(box) }
+    }
+
+    /* ---------------------------- 顶部隐藏入口 ---------------------------- */
+
+    /**
+     * 顶部安全区（刘海/状态栏那一条，页面内容不会覆盖到）双击 → 重新配置地址。
+     * 常驻 UI 里不加任何按钮，入口藏在这里。
+     */
+    private fun addTopHotspot() {
+        if (hotspot != null) return
+        val spot = View(this)
+        val lp = FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, insetTop)
+        spot.visibility = if (insetTop > 0) View.VISIBLE else View.GONE
+        spot.setOnClickListener(object : View.OnClickListener {
+            private var last = 0L
+            override fun onClick(v: View?) {
+                val now = SystemClock.uptimeMillis()
+                if (now - last < 600) {
+                    last = 0
+                    startActivity(Intent(this@MainActivity, SetupActivity::class.java))
+                } else {
+                    last = now
+                }
+            }
+        })
+        hotspot = spot
+        root.addView(spot, lp)
+    }
+
+    /* ---------------------------- 通知 ---------------------------- */
+
+    private fun maybeAskNotificationPermission() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        if (Notifier.hasPermission(this)) return
+        handler.postDelayed({
+            if (isFinishing || isDestroyed) return@postDelayed
+            runCatching {
+                requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQ_NOTIF)
+            }
+        }, 2600)
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == REQ_NOTIF && grantResults.firstOrNull() == 0) {
+            Notifier.ensureChannel(this)
+        }
+    }
+
+    /* ---------------------------- 生命周期 ---------------------------- */
+
+    inner class WebBridge {
+        @JavascriptInterface
+        fun setBackground(css: String?) {
+            val color = parseCssColor(css ?: return) ?: return
+            if (color == bgColor) return
+            bgColor = color
+            prefs.lastBg = color
+            handler.post {
+                window.setBackgroundDrawable(ColorDrawable(color))
+                root.setBackgroundColor(color)
+                webView?.setBackgroundColor(color)
+                loadingOverlay?.setBackgroundColor(color)
+                errorOverlay?.setBackgroundColor(color)
+            }
+        }
+
+        @JavascriptInterface
+        fun onTurnEnd(title: String?) {
+            if (resumed) return // 用户正看着页面，不用通知
+            val detail = title?.trim().orEmpty()
+            handler.post {
+                Notifier.notifyTurnDone(this@MainActivity, detail)
+            }
+        }
+
+        @JavascriptInterface
+        fun savePin(pin: String?) {
+            val v = pin?.trim().orEmpty()
+            if (v.isEmpty() || v.length > 128) return
+            if (v == prefs.pin) return
+            prefs.pin = v
+        }
+
+        @JavascriptInterface
+        fun log(msg: String?) {
+            Log.d(TAG, "js: ${msg ?: ""}")
+        }
+    }
+
+    private fun parseCssColor(css: String): Int? {
+        val s = css.trim()
+        return try {
+            when {
+                s.startsWith("#") -> Color.parseColor(s)
+                s.startsWith("rgb") -> {
+                    val nums = s.substringAfter('(').substringBefore(')')
+                        .split(',').map { it.trim() }
+                    if (nums.size < 3) return null
+                    val r = nums[0].toFloat().toInt()
+                    val g = nums[1].toFloat().toInt()
+                    val b = nums[2].toFloat().toInt()
+                    val a = if (nums.size >= 4) (nums[3].toFloat() * 255).toInt() else 255
+                    Color.argb(a.coerceIn(0, 255), r, g, b)
+                }
+                else -> null
+            }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    private fun readAsset(name: String): String {
+        return try {
+            assets.open(name).use { input ->
+                BufferedReader(input.reader()).readText()
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "asset $name: ${e.message}")
+            ""
+        }
+    }
+
+    private fun dp(v: Int): Int =
+        (v * resources.displayMetrics.density).toInt()
+
+    override fun onResume() {
+        super.onResume()
+        resumed = true
+        if (!prefs.configured) {
+            startActivity(Intent(this, SetupActivity::class.java))
+            finish()
+        }
+    }
+
+    override fun onPause() {
+        resumed = false
+        runCatching { CookieManager.getInstance().flush() }
+        super.onPause()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (intent.getBooleanExtra(EXTRA_RELOAD, false) && prefs.configured) {
+            hideErrorOverlay()
+            showLoadingOverlay()
+            loadTarget()
+        }
+    }
+
+    override fun onBackPressed() {
+        val wv = webView
+        if (wv != null && wv.canGoBack()) {
+            wv.goBack()
+            return
+        }
+        val now = SystemClock.uptimeMillis()
+        if (now - lastBackAt < 2000) {
+            super.onBackPressed()
+            return
+        }
+        lastBackAt = now
+        Toast.makeText(this, R.string.back_again_exit, Toast.LENGTH_SHORT).show()
+    }
+
+    override fun onDestroy() {
+        handler.removeCallbacksAndMessages(null)
+        val wv = webView
+        webView = null
+        runCatching {
+            root.removeView(wv)
+            wv?.stopLoading()
+            wv?.destroy()
+        }
+        super.onDestroy()
+    }
+}
