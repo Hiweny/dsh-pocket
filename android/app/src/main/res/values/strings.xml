@@ -10,7 +10,7 @@
     <string name="setup_scan_hint">扫电脑上「手机访问」页的二维码</string>
     <string name="setup_err_empty">请先填写访问地址</string>
     <string name="setup_err_url">地址格式不对，示例：192.168.1.10:3081</string>
-    <string name="setup_tip">地址与密码只保存在本机</string>
+    <string name="setup_tip">地址与密码只保存在本机 · 进入后双击屏幕顶部可重新配置</string>
     <string name="scan_permission">需要相机权限才能扫码</string>
     <string name="notif_channel_name">任务完成提醒</string>
     <string name="notif_channel_desc">电脑上的 DSH 跑完任务时通知你</string>

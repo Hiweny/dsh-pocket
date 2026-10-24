@@ -77,6 +77,7 @@ class MainActivity : AppCompatActivity() {
     private var insetBottom = 0
     private var imeBottom = 0
     private var resumed = false
+    private var mainFrameError = false
     private var lastBackAt = 0L
     private val handler = Handler(Looper.getMainLooper())
 
@@ -92,6 +93,8 @@ class MainActivity : AppCompatActivity() {
         bgColor = if (prefs.lastBg != 0) prefs.lastBg
         else ContextCompat.getColor(this, R.color.window_bg)
 
+        // 必须在任何 WebView 实例创建之前调用（调试期可改成 true 用 chrome://inspect）
+        WebView.setWebContentsDebuggingEnabled(false)
         setupWindow()
         root = FrameLayout(this)
         root.setBackgroundColor(bgColor)
@@ -282,7 +285,6 @@ class MainActivity : AppCompatActivity() {
 
         CookieManager.getInstance().setAcceptCookie(true)
         CookieManager.getInstance().setAcceptThirdPartyCookies(wv, true)
-        WebView.setWebContentsDebuggingEnabled(false)
 
         wv.addJavascriptInterface(WebBridge(), "DSHPocket")
 
@@ -291,9 +293,15 @@ class MainActivity : AppCompatActivity() {
                 hideLoadingOverlay()
             }
 
+            override fun onPageStarted(view: WebView, url: String, favicon: android.graphics.Bitmap?) {
+                super.onPageStarted(view, url, favicon)
+                mainFrameError = false
+            }
+
             override fun onPageFinished(view: WebView, url: String) {
                 hideLoadingOverlay()
-                hideErrorOverlay()
+                // 主文档加载失败时 onPageFinished 同样会回调，别把错误提示一起收掉
+                if (!mainFrameError) hideErrorOverlay()
                 injectFallback(view)
                 prefs.lastHost = Uri.parse(prefs.baseUrl).host ?: ""
                 CookieManager.getInstance().flush()
@@ -310,6 +318,7 @@ class MainActivity : AppCompatActivity() {
                 error: android.webkit.WebResourceError
             ) {
                 if (request.isForMainFrame) {
+                    mainFrameError = true
                     showErrorOverlay(error.description?.toString())
                 }
             }
@@ -729,6 +738,17 @@ class MainActivity : AppCompatActivity() {
         resumed = false
         runCatching { CookieManager.getInstance().flush() }
         super.onPause()
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) {
+            WindowInsetsControllerCompat(window, window.decorView).apply {
+                hide(WindowInsetsCompat.Type.systemBars())
+                systemBarsBehavior =
+                    WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            }
+        }
     }
 
     override fun onNewIntent(intent: Intent) {
