@@ -105,7 +105,14 @@ class MainActivity : AppCompatActivity() {
         setupImeAnimation()
 
         showLoadingOverlay()
-        createWebView()
+        val major = chromiumMajor()
+        if (major in 1..93) {
+            // 旧内核：DSH 的 bundle 用了 static 初始化块 / ??= 之类语法，
+            // 低于 Chromium 94 直接白屏，先给明确提示而不是让用户对着白屏。
+            showKernelOverlay(major)
+            return
+        }
+        safeCreateWebView()
         loadTarget()
         maybeAskNotificationPermission()
     }
@@ -205,6 +212,34 @@ class MainActivity : AppCompatActivity() {
     }
 
     /* ---------------------------- WebView ---------------------------- */
+
+    private fun chromiumMajor(): Int {
+        return try {
+            val ua = WebSettings.getDefaultUserAgent(this)
+            Regex("Chrome/(\\d+)").find(ua)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 0
+        } catch (e: Exception) {
+            0
+        }
+    }
+
+    private fun safeCreateWebView() {
+        try {
+            createWebView()
+        } catch (t: Throwable) {
+            Log.e(TAG, "WebView unavailable: ${t.message}")
+            hideLoadingOverlay()
+            removeCard()
+            val card = buildCard(getString(R.string.webview_missing), null, emptyList())
+            errorOverlay = card
+            root.addView(
+                card,
+                FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+                )
+            )
+        }
+    }
 
     @SuppressLint("SetJavaScriptEnabled")
     private fun createWebView() {
@@ -340,7 +375,7 @@ class MainActivity : AppCompatActivity() {
             Log.w(TAG, "destroy failed: ${e.message}")
         }
         showLoadingOverlay()
-        createWebView()
+        safeCreateWebView()
         loadTarget()
     }
 
@@ -454,44 +489,23 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showErrorOverlay(detail: String?) {
-        if (errorOverlay != null) return
         hideLoadingOverlay()
-        val box = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER
-            setBackgroundColor(bgColor)
-            setPadding(dp(32), dp(32), dp(32), dp(32))
+        removeCard()
+        val body = (detail ?: "").ifBlank {
+            "请确认电脑上的 dsh web 正在运行，并且手机和电脑在同一个网络。"
         }
-        val title = TextView(this).apply {
-            text = "连不上这个地址"
-            setTextColor(ContextCompat.getColor(this@MainActivity, R.color.text_primary))
-            textSize = 18f
-            gravity = Gravity.CENTER
-        }
-        val desc = TextView(this).apply {
-            text = (detail ?: "").ifBlank { "请确认电脑上的 dsh web 正在运行，并且手机和电脑在同一个网络。" }
-            setTextColor(ContextCompat.getColor(this@MainActivity, R.color.text_secondary))
-            textSize = 13f
-            gravity = Gravity.CENTER
-            setPadding(0, dp(10), 0, dp(24))
-        }
-        val btn = TextView(this).apply {
-            text = "检查地址"
-            setTextColor(Color.WHITE)
-            textSize = 15f
-            gravity = Gravity.CENTER
-            background = ContextCompat.getDrawable(this@MainActivity, R.drawable.bg_button)
-            setPadding(dp(28), dp(12), dp(28), dp(12))
-            setOnClickListener {
-                startActivity(Intent(this@MainActivity, SetupActivity::class.java))
-            }
-        }
-        box.addView(title)
-        box.addView(desc)
-        box.addView(btn)
-        errorOverlay = box
+        val card = buildCard(
+            "连不上这个地址",
+            body,
+            listOf(
+                "检查地址" to {
+                    startActivity(Intent(this, SetupActivity::class.java))
+                }
+            )
+        )
+        errorOverlay = card
         root.addView(
-            box,
+            card,
             FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
@@ -499,11 +513,80 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
-    private fun hideErrorOverlay() {
+    /** 内核太旧（Chromium < 94）：DSH 前端用到的语法/API 不支持，会白屏或明显卡顿。 */
+    private fun showKernelOverlay(major: Int) {
+        hideLoadingOverlay()
+        removeCard()
+        val card = buildCard(
+            getString(R.string.kernel_old_title),
+            getString(R.string.kernel_old_body, major),
+            listOf(
+                getString(R.string.kernel_old_retry) to { recreate() },
+                getString(R.string.kernel_old_continue) to {
+                    removeCard()
+                    safeCreateWebView()
+                    loadTarget()
+                    maybeAskNotificationPermission()
+                }
+            )
+        )
+        errorOverlay = card
+        root.addView(
+            card,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        )
+    }
+
+    private fun buildCard(title: String, body: String?, actions: List<Pair<String, () -> Unit>>): View {
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            setBackgroundColor(bgColor)
+            setPadding(dp(28), dp(28), dp(28), dp(28))
+        }
+        box.addView(TextView(this).apply {
+            text = title
+            setTextColor(ContextCompat.getColor(this@MainActivity, R.color.text_primary))
+            textSize = 18f
+            gravity = Gravity.CENTER
+        })
+        if (!body.isNullOrBlank()) {
+            box.addView(TextView(this).apply {
+                text = body
+                setTextColor(ContextCompat.getColor(this@MainActivity, R.color.text_secondary))
+                textSize = 13f
+                gravity = Gravity.CENTER
+                setPadding(dp(6), dp(14), dp(6), 0)
+                setLineSpacing(0f, 1.25f)
+            })
+        }
+        actions.forEach { (label, action) ->
+            box.addView(TextView(this).apply {
+                text = label
+                setTextColor(Color.WHITE)
+                textSize = 15f
+                gravity = Gravity.CENTER
+                background = ContextCompat.getDrawable(this@MainActivity, R.drawable.bg_button)
+                setPadding(dp(26), dp(12), dp(26), dp(12))
+                setOnClickListener { runCatching { action() } }
+            }, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(14) })
+        }
+        return box
+    }
+
+    private fun removeCard() {
         val box = errorOverlay ?: return
         errorOverlay = null
         runCatching { root.removeView(box) }
     }
+
+    private fun hideErrorOverlay() = removeCard()
 
     /* ---------------------------- 顶部隐藏入口 ---------------------------- */
 

@@ -18,4 +18,9 @@
     <string name="notif_text_done">电脑上的 DSH 已经跑完了，点开看看结果</string>
     <string name="back_again_exit">再按一次退出</string>
     <string name="menu_change">更换地址</string>
+    <string name="kernel_old_title">浏览器内核太旧</string>
+    <string name="kernel_old_body">当前 WebView 内核是 Chromium %1$d，DSH 的前端需要 Chromium 94 以上，否则会白屏或明显卡顿。\n\n请在应用商店更新「Android System WebView」或 Chrome，更新后回到这里点「已更新，重试」。</string>
+    <string name="kernel_old_continue">仍然继续</string>
+    <string name="kernel_old_retry">已更新，重试</string>
+    <string name="webview_missing">这台设备缺少 WebView 组件，无法显示页面。请在应用商店安装或启用「Android System WebView」。</string>
 </resources>
