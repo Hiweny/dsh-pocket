@@ -3,7 +3,8 @@ name: Android APK
 on:
   push:
     tags:
-      - 'v*'
+      # 上游仓库把 v* 用掉了（插件版本号），APK 单独用 apk-v* 命名
+      - 'apk-v*'
   workflow_dispatch:
 
 permissions:
@@ -57,7 +58,7 @@ jobs:
         working-directory: android
         run: |
           if [ "$GITHUB_REF_TYPE" = "tag" ]; then
-            export DSH_VERSION_NAME="${GITHUB_REF_NAME#v}"
+            export DSH_VERSION_NAME="${GITHUB_REF_NAME#apk-v}"
           else
             export DSH_VERSION_NAME="1.0.0-${GITHUB_RUN_NUMBER}"
           fi
@@ -77,7 +78,7 @@ jobs:
           if-no-files-found: error
 
       - name: Publish release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/apk-v')
         uses: softprops/action-gh-release@v2
         with:
           files: |
