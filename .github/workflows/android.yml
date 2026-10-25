@@ -81,12 +81,16 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/apk-v')
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            android/out/DSHPocket.apk
-            android/out/DSHPocket-${{ github.ref_name }}.apk
+          files: android/out/DSHPocket.apk
           generate_release_notes: true
           body: |
             DSH Pocket Android 客户端（WebView 壳，配合 dsh-pocket 插件使用）。
 
             安装后填入电脑上「设置 → 手机访问」里的地址（或扫码），
             输入访问密码即可全屏使用；密码会记住，下次直接进入。
+
+            **本次要点**
+            - 软键盘改由系统 resize 驱动：输入框该起就起、该落就落，不再有延迟和“闪两下”
+            - 输入卡顿修复：去掉逐帧重排、去掉高频强制样式计算、WebSocket 帧改字节级匹配
+            - Enter 只换行，不再当发送键（发送用输入框自己的按钮）
+            - 界面整体减负：减少重复注入与多余绘制

@@ -38,7 +38,6 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
-import androidx.core.view.WindowInsetsAnimationCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.webkit.WebViewCompat
@@ -73,11 +72,11 @@ class MainActivity : AppCompatActivity() {
     private var hotspot: View? = null
 
     private var bgColor: Int = 0
-    private var insetTop = 0
-    private var insetBottom = 0
-    private var imeBottom = 0
+    private var safeTop = 0
+    private var safeBottom = 0
     private var resumed = false
     private var mainFrameError = false
+    private var docStartOk = false
     private var lastBackAt = 0L
     private val handler = Handler(Looper.getMainLooper())
 
@@ -102,10 +101,8 @@ class MainActivity : AppCompatActivity() {
 
         ViewCompat.setOnApplyWindowInsetsListener(root) { _, insets ->
             readInsets(insets)
-            applyInsets()
             insets
         }
-        setupImeAnimation()
 
         showLoadingOverlay()
         val major = chromiumMajor()
@@ -124,7 +121,13 @@ class MainActivity : AppCompatActivity() {
 
     private fun setupWindow() {
         window.setBackgroundDrawable(ColorDrawable(bgColor))
-        WindowCompat.setDecorFitsSystemWindows(window, false)
+        // 关键：保持「decor 参与系统窗口布局」（默认行为）。
+        // 软键盘弹出时由系统直接把窗口内容区缩小（adjustResize），
+        // WebView 的 viewport 一次性变矮：
+        //   - 不再有我们手动改高度导致的逐帧 reflow（输入卡顿 + 来回闪的根因）
+        //   - 不存在「该撑不撑 / 降不下去」和动画延迟
+        // 沉浸式是靠 hide(systemBars) 实现的，与这条不冲突。
+        WindowCompat.setDecorFitsSystemWindows(window, true)
         val controller = WindowInsetsControllerCompat(window, window.decorView)
         controller.hide(WindowInsetsCompat.Type.systemBars())
         controller.systemBarsBehavior =
@@ -134,84 +137,45 @@ class MainActivity : AppCompatActivity() {
                 WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            // 关掉系统给透明系统栏自动加的对比度底衬 —— 那层底衬在深色页面上
-            // 会表现为一条灰白细线。
+            // 关掉系统给透明系统栏自动加的对比度底衬（深色页面下会露一条灰白线）
             window.isStatusBarContrastEnforced = false
             window.isNavigationBarContrastEnforced = false
         }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            // Android 11+：窗口不因 IME 自行 resize，改由 insets 逐帧驱动，
-            // 这样键盘动画与页面高度变化是同一帧完成的，不会二次跳动。
-            window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING)
-        } else {
-            window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
-        }
+        window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
     }
 
+    /**
+     * 只算「固定在屏幕两端的避让」：刘海高度 + 手势条高度。
+     * 键盘高度不参与 —— 那交给系统 resize。
+     */
     private fun readInsets(insets: WindowInsetsCompat) {
         val cut = insets.getInsets(WindowInsetsCompat.Type.displayCutout()).top
-        val status = insets.getInsets(WindowInsetsCompat.Type.statusBars()).top
-        insetTop = maxOf(cut, status)
-        val nav = insets.getInsets(WindowInsetsCompat.Type.navigationBars()).bottom
         val gesture = insets.getInsets(WindowInsetsCompat.Type.systemGestures()).bottom
-        insetBottom = maxOf(nav, gesture)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            imeBottom = insets.getInsets(WindowInsetsCompat.Type.ime()).bottom
-        }
+        val nav = insets.getInsets(WindowInsetsCompat.Type.navigationBars()).bottom
+        val newTop = cut
+        val newBottom = maxOf(gesture, nav)
+        if (newTop == safeTop && newBottom == safeBottom) return
+        safeTop = newTop
+        safeBottom = newBottom
+        applyStaticInsets()
     }
 
-    /** 把安全区/键盘高度应用到 WebView 外边距（而不是 padding，避免内容溢出绘制）。 */
-    private fun applyInsets() {
+    private fun applyStaticInsets() {
         val wv = webView ?: return
         val lp = wv.layoutParams as? FrameLayout.LayoutParams ?: return
-        val newTop = insetTop
-        val newBottom = maxOf(insetBottom, imeBottom)
-        if (lp.topMargin == newTop && lp.bottomMargin == newBottom) return
-        lp.topMargin = newTop
-        lp.bottomMargin = newBottom
-        wv.layoutParams = lp
-
+        if (lp.topMargin != safeTop || lp.bottomMargin != safeBottom) {
+            lp.topMargin = safeTop
+            lp.bottomMargin = safeBottom
+            wv.layoutParams = lp
+        }
         hotspot?.let { spot ->
             val hlp = spot.layoutParams as? FrameLayout.LayoutParams ?: return@let
-            if (hlp.height != newTop) {
-                hlp.height = newTop
+            if (hlp.height != safeTop) {
+                hlp.height = safeTop
                 spot.layoutParams = hlp
-                spot.visibility = if (newTop > 0) View.VISIBLE else View.GONE
+                spot.visibility = if (safeTop > 0) View.VISIBLE else View.GONE
             }
         }
-    }
-
-    private fun setupImeAnimation() {
-        ViewCompat.setWindowInsetsAnimationCallback(
-            root,
-            object : WindowInsetsAnimationCompat.Callback(DISPATCH_MODE_CONTINUE_ON_SUBTREE) {
-                override fun onProgress(
-                    insets: WindowInsetsCompat,
-                    runningAnimations: MutableList<WindowInsetsAnimationCompat>
-                ): WindowInsetsCompat {
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                        val h = insets.getInsets(WindowInsetsCompat.Type.ime()).bottom
-                        if (h != imeBottom) {
-                            imeBottom = h
-                            applyInsets()
-                        }
-                    }
-                    return insets
-                }
-
-                override fun onEnd(animation: WindowInsetsAnimationCompat) {
-                    super.onEnd(animation)
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                        val h = ViewCompat.getRootWindowInsets(root)
-                            ?.getInsets(WindowInsetsCompat.Type.ime())?.bottom ?: 0
-                        if (h != imeBottom) {
-                            imeBottom = h
-                            applyInsets()
-                        }
-                    }
-                }
-            }
-        )
     }
 
     /* ---------------------------- WebView ---------------------------- */
@@ -345,7 +309,7 @@ class MainActivity : AppCompatActivity() {
 
         webView = wv
         root.addView(wv, 0)
-        applyInsets()
+        applyStaticInsets()
         injectDocumentStart(wv)
         addTopHotspot()
     }
@@ -357,6 +321,7 @@ class MainActivity : AppCompatActivity() {
             if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
                 // document-start 注入：能赶在页面脚本之前 hook WebSocket
                 WebViewCompat.addDocumentStartJavaScript(wv, js, setOf("*"))
+                docStartOk = true
             }
         } catch (e: Exception) {
             Log.w(TAG, "doc-start inject failed: ${e.message}")
@@ -365,6 +330,7 @@ class MainActivity : AppCompatActivity() {
 
     /** 老内核（不支持 document-start）兜底：页面加载完再注入一次，脚本自身幂等。 */
     private fun injectFallback(wv: WebView) {
+        if (docStartOk) return   // 已经由 document-start 注入过，别再解析一遍 13KB
         val js = readAsset("inject.js")
         if (js.isBlank()) return
         try {
@@ -606,8 +572,8 @@ class MainActivity : AppCompatActivity() {
     private fun addTopHotspot() {
         if (hotspot != null) return
         val spot = View(this)
-        val lp = FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, insetTop)
-        spot.visibility = if (insetTop > 0) View.VISIBLE else View.GONE
+        val lp = FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, safeTop)
+        spot.visibility = if (safeTop > 0) View.VISIBLE else View.GONE
         spot.setOnClickListener(object : View.OnClickListener {
             private var last = 0L
             override fun onClick(v: View?) {
@@ -742,7 +708,13 @@ class MainActivity : AppCompatActivity() {
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        if (hasFocus) {
+        if (!hasFocus) return
+        // 只在系统栏确实可见时才重新隐藏：无脑每次 hide 会触发一次 insets 变化，
+        // 表现就是「点一下输入框，页面闪一下」。
+        val insets = ViewCompat.getRootWindowInsets(root) ?: return
+        val barsVisible = insets.isVisible(WindowInsetsCompat.Type.statusBars()) ||
+            insets.isVisible(WindowInsetsCompat.Type.navigationBars())
+        if (barsVisible) {
             WindowInsetsControllerCompat(window, window.decorView).apply {
                 hide(WindowInsetsCompat.Type.systemBars())
                 systemBarsBehavior =

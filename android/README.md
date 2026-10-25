@@ -13,8 +13,9 @@
 | 全屏沉浸 | `WindowCompat.setDecorFitsSystemWindows(false)` + 隐藏系统栏 + `BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE`，页面铺满整屏 |
 | 顶部/底部无白线 | 注入脚本把页面真实背景色回报原生，窗口 / WebView / loading 遮罩三层同步同一个颜色；关掉系统栏对比度底衬；`overScrollMode=NEVER` + `overscroll-behavior:none` 去橡皮筋露底 |
 | 不加多余按钮 | 主界面只有 WebView。改地址的入口藏在顶部安全区（刘海那一条）**双击**；页面打不开时会出现「检查地址」 |
-| 输入框能撑起来 | Android 11+ 用 `WindowInsetsAnimation` 逐帧跟随键盘动画改 WebView 高度（viewport 真正变矮，页面里的 composer 自然上移），而不是整体平移 |
-| 不闪、不卡 | 冷启动用上次页面底色做窗口底色（不闪白）；`textZoom` 固定 100 避免系统字号导致重排；关掉自绘滚动条叠层与点击高亮；`rendererPriority=IMPORTANT` 保证后台仍能收流式数据；渲染进程被回收自动重建 WebView |
+| 输入框能撑起来 | 交给系统 `adjustResize` 直接缩小窗口内容区（`setDecorFitsSystemWindows(true)` + 隐藏系统栏），WebView 的 viewport 一次性变矮，composer 自然上移。**不手动逐帧改高度**——那会带来逐帧重排、闪两下和输入卡顿 |
+| Enter 只换行 | 注入脚本在 document 捕获阶段截住 Enter（不 `preventDefault`），页面收不到「发送」，浏览器默认插入换行照常发生；Shift/Ctrl 组合键与输入法组词中的 Enter 一律放行 |
+| 不闪、不卡 | 冷启动用上次页面底色做窗口底色（不闪白）；`textZoom` 固定 100 避免系统字号导致重排；点击高亮关闭；`rendererPriority=IMPORTANT` 保证后台仍能收流式数据；渲染进程被回收自动重建 WebView。<br>注入脚本刻意保持“零高频开销”：背景色同步走 `requestAnimationFrame` 节流（绝不在高频回调里 `getComputedStyle`）、WebSocket 帧用字节级 `turn/end` 匹配（200KB 帧 ~0.06ms，零解码零分配）、document-start 注入成功就不再重复注入 |
 | 通知 | hook 页面 WebSocket，识别 dsh 的 `turn/end`（回合结束）；应用在后台时发一条「任务已完成」通知 |
 
 ## 本地构建
