@@ -74,6 +74,8 @@ class MainActivity : AppCompatActivity() {
     private var bgColor: Int = 0
     private var safeTop = 0
     private var safeBottom = 0
+    private var imeH = 0
+    private var imeFallbackApplied = false
     private var resumed = false
     private var mainFrameError = false
     private var docStartOk = false
@@ -101,6 +103,7 @@ class MainActivity : AppCompatActivity() {
 
         ViewCompat.setOnApplyWindowInsetsListener(root) { _, insets ->
             readInsets(insets)
+            trackIme(insets)
             insets
         }
 
@@ -158,6 +161,43 @@ class MainActivity : AppCompatActivity() {
         safeTop = newTop
         safeBottom = newBottom
         applyStaticInsets()
+    }
+
+    /**
+     * 极少数 ROM 在「隐藏系统栏 + adjustResize」时不会真的缩小窗口，
+     * 表现就是「该撑起来不撑起来」。这里在键盘稳定后校验一次：
+     * 如果窗口高度没有随键盘变小，就由我们自己给 WebView 让出这块高度。
+     */
+    private fun trackIme(insets: WindowInsetsCompat) {
+        val h = insets.getInsets(WindowInsetsCompat.Type.ime()).bottom
+        if (h == imeH) return
+        imeH = h
+        handler.removeCallbacks(imeFallback)
+        handler.postDelayed(imeFallback, 280)
+    }
+
+    private val imeFallback = Runnable {
+        val wv = webView ?: return@Runnable
+        val lp = wv.layoutParams as? FrameLayout.LayoutParams ?: return@Runnable
+        if (imeH <= 0) {
+            if (imeFallbackApplied) {
+                imeFallbackApplied = false
+                lp.bottomMargin = safeBottom
+                wv.layoutParams = lp
+            }
+            return@Runnable
+        }
+        val screenH = resources.displayMetrics.heightPixels
+        val shrunk = screenH - root.height
+        if (shrunk < imeH / 2) {
+            // 窗口没缩 → 自己补
+            imeFallbackApplied = true
+            val target = maxOf(safeBottom, imeH)
+            if (lp.bottomMargin != target) {
+                lp.bottomMargin = target
+                wv.layoutParams = lp
+            }
+        }
     }
 
     private fun applyStaticInsets() {

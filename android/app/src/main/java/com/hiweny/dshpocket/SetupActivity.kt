@@ -76,7 +76,18 @@ class SetupActivity : AppCompatActivity() {
                 false
             }
         }
+        findViewById<TextView>(R.id.kernel_info).text =
+            "WebView Chromium ${webViewMajor()} · App v${BuildConfig.VERSION_NAME}"
         urlInput.requestFocus()
+    }
+
+    private fun webViewMajor(): String {
+        return try {
+            val ua = android.webkit.WebSettings.getDefaultUserAgent(this)
+            Regex("Chrome/(\\d+)").find(ua)?.groupValues?.getOrNull(1) ?: "未知"
+        } catch (e: Exception) {
+            "未知"
+        }
     }
 
     private fun requestScan() {
