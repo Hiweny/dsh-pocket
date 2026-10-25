@@ -690,6 +690,9 @@ class MainActivity : AppCompatActivity() {
         }
 
         @JavascriptInterface
+        fun smoothMode(): Boolean = prefs.smooth
+
+        @JavascriptInterface
         fun log(msg: String?) {
             Log.d(TAG, "js: ${msg ?: ""}")
         }

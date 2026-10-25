@@ -23,4 +23,6 @@
     <string name="kernel_old_continue">仍然继续</string>
     <string name="kernel_old_retry">已更新，重试</string>
     <string name="webview_missing">这台设备缺少 WebView 组件，无法显示页面。请在应用商店安装或启用「Android System WebView」。</string>
+    <string name="setup_smooth">流畅优先</string>
+    <string name="setup_smooth_desc">长会话时屏幕外的消息不渲染，滚动更顺</string>
 </resources>

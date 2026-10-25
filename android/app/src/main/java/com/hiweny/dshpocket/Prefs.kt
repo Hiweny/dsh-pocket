@@ -25,6 +25,11 @@ class Prefs(context: Context) {
         get() = SecretBox.open(pinSealed)
         set(value) = run { pinSealed = SecretBox.seal(value) }
 
+    /** 流畅优先：长会话跳过屏外消息渲染（content-visibility）+ 关闭平滑滚动。 */
+    var smooth: Boolean
+        get() = sp.getBoolean(KEY_SMOOTH, true)
+        set(value) = sp.edit().putBoolean(KEY_SMOOTH, value).apply()
+
     /** 上次页面实际背景色（ARGB），用于冷启动时消除白闪。 */
     var lastBg: Int
         get() = sp.getInt(KEY_BG, 0)
@@ -46,6 +51,7 @@ class Prefs(context: Context) {
         private const val KEY_URL = "base_url"
         private const val KEY_PIN = "pin_sealed"
         private const val KEY_BG = "last_bg"
+        private const val KEY_SMOOTH = "smooth_mode"
         private const val KEY_HOST = "last_host"
     }
 }

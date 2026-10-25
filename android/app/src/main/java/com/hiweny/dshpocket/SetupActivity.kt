@@ -66,6 +66,10 @@ class SetupActivity : AppCompatActivity() {
         val savedPin = prefs.pin
         if (savedPin.isNotBlank()) pinInput.setText(savedPin)
 
+        val smoothSwitch = findViewById<androidx.appcompat.widget.SwitchCompat>(R.id.smooth_switch)
+        smoothSwitch.isChecked = prefs.smooth
+        smoothSwitch.setOnCheckedChangeListener { _, checked -> prefs.smooth = checked }
+
         findViewById<ImageView>(R.id.scan_btn).setOnClickListener { requestScan() }
         findViewById<TextView>(R.id.enter_btn).setOnClickListener { submit() }
         pinInput.setOnEditorActionListener { _, actionId, _ ->

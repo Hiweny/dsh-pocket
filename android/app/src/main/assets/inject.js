@@ -1,21 +1,22 @@
 /*!
  * DSH Pocket WebView 注入脚本（document-start 执行）
  *
- * 原则：能少做就少做。这个脚本会在流式输出时被成千上万次事件打到，
- * 任何一次多余的解码 / 强制样式计算都会变成用户能感觉到的卡顿。
+ * 这个脚本会被流式输出时每秒几十上百次的 WebSocket 帧打到，
+ * 所以每一处都必须「先做最便宜的判断，再考虑解析」。
  *
- * 做五件事：
- *   0. 旧内核兼容垫片（只补不存在的方法，不覆盖已有实现）
- *   1. 回报页面真实背景色（原生据此同步窗口底色，消除白边/白闪）
- *   2. 识别 dsh 的 `turn/end`（回合结束）→ 原生发通知（字节级匹配，零解码）
- *   3. Enter 只换行、不发送（发送交给输入框自己的按钮）
- *   4. 记住密码页里手输的密码，下次直接用 ?token= 免密进入
+ * 六件事：
+ *   0. 旧内核兼容垫片（只补不存在的 API）
+ *   1. 回报页面真实背景色（rAF 节流，绝不在高频回调里 getComputedStyle）
+ *   2. 长会话性能：屏外消息不参与渲染（content-visibility），可被 App 关闭
+ *   3. 回合结束通知：只认「当前会话的 follow 流」+ 小帧 + 静止确认 + 生成中检测
+ *   4. Enter 只换行，不发送
+ *   5. 记住密码页手输的密码
  */
 (function () {
   'use strict';
   try {
-    if (window.top !== window) return;            // 只在主文档运行
-    if (window.__dshPocketInjected) return;       // 幂等
+    if (window.top !== window) return;
+    if (window.__dshPocketInjected) return;
     window.__dshPocketInjected = 1;
 
     var W = window;
@@ -25,8 +26,6 @@
     }
 
     /* ================= 0. 旧内核兼容垫片 ================= */
-    /* Vite 只降语法、不 polyfill 运行时 API。缺这些方法时页面表现为
-       「发送消息报 AbortSignal.any is not a function」或按钮点了没反应。 */
     function shimLegacy() {
       try {
         var AP = Array.prototype;
@@ -150,7 +149,6 @@
           }
         }
 
-        // 明文 http（局域网）不是安全上下文，这两样在新内核上也可能没有
         if (typeof crypto !== 'undefined' && !crypto.randomUUID && crypto.getRandomValues) {
           crypto.randomUUID = function () {
             var b = new Uint8Array(16);
@@ -192,9 +190,7 @@
       } catch (e) { /* 注入失败也不能影响页面 */ }
     }
 
-    /* ================= 1. 背景色同步（节流 + rAF） ================= */
-    /* 注意：绝不能在任何高频回调里直接 getComputedStyle —— 那会强制同步
-       样式计算，打字时会明显卡。这里统一丢进 rAF，一帧最多算一次。 */
+    /* ================= 1. 背景色同步 ================= */
     var lastBg = '';
     var bgScheduled = false;
 
@@ -219,10 +215,7 @@
     function reportBg() {
       if (bgScheduled) return;
       bgScheduled = true;
-      var run = function () {
-        bgScheduled = false;
-        reportBgNow();
-      };
+      var run = function () { bgScheduled = false; reportBgNow(); };
       if (W.requestAnimationFrame) W.requestAnimationFrame(run);
       else setTimeout(run, 60);
     }
@@ -237,8 +230,6 @@
       } catch (e) { /* ignore */ }
       try {
         if (!W.MutationObserver) return;
-        // 只盯根元素，且只盯会和主题相关的属性；
-        // 不观察 body（流式输出时属性变化太频繁，会把样式计算打爆）。
         var mo = new MutationObserver(function () { reportBg(); });
         mo.observe(document.documentElement, {
           attributes: true,
@@ -247,32 +238,167 @@
       } catch (e) { /* ignore */ }
     }
 
-    /* ================= 2. 回合结束 → 通知 ================= */
-    var loadedAt = Date.now();
-    var lastEndAt = 0;
-    // "turn/end" 的 ASCII 字节，做零分配匹配
-    var NEEDLE = new Uint8Array([0x74, 0x75, 0x72, 0x6e, 0x2f, 0x65, 0x6e, 0x64]);
+    /* ================= 2. 长会话渲染优化 ================= */
+    /* content-visibility:auto 让「滚出屏幕的消息」跳过渲染与布局。
+       agent 一口气调用几十个工具时，DOM 会变得很长，浏览器每次插入内容
+       都要为整列重新布局 —— 跳过屏外内容能把成本削掉一大截。
+       仅作用于滚动容器的直接子项，由 App 侧「流畅优先」开关控制。 */
+    var perfApplied = false;
 
-    function fireTurnEnd() {
+    function smoothEnabled() {
+      try {
+        var b = bridge();
+        if (b && typeof b.smoothMode === 'function') return !!b.smoothMode();
+      } catch (e) { /* ignore */ }
+      return true;
+    }
+
+    function injectPerfCss() {
+      if (perfApplied) return;
+      if (!smoothEnabled()) return;
+      try {
+        if (document.getElementById('dshpocket-perf-css')) { perfApplied = true; return; }
+        var el = document.createElement('style');
+        el.id = 'dshpocket-perf-css';
+        el.textContent =
+          // 流式输出时禁用平滑滚动：内容每帧都在长，smooth 会变成连续动画
+          '[class*="scrollBody"]{scroll-behavior:auto !important;}' +
+          // 屏外消息不渲染；contain-intrinsic-size 的 auto 会记住已渲染高度，
+          // 滚回去不会跳。两行是给新旧内核的降级写法。
+          '[class*="scrollBody"] > *{' +
+            'content-visibility:auto;' +
+            'contain-intrinsic-size:320px;' +
+            'contain-intrinsic-size:auto 320px;' +
+          '}';
+        var head = document.head || document.documentElement;
+        if (head) {
+          head.appendChild(el);
+          perfApplied = true;
+        }
+      } catch (e) { /* ignore */ }
+    }
+
+    /* ================= 3. 回合结束 → 通知 ================= */
+    /* 曾经的误发来源：
+         a) 全局事件流（$events）会把「任何会话」的 turn/end 都推过来；
+         b) 切换/重连时的 snapshot 里带着历史 turn/end；
+         c) 一个回合内有多次状态推送。
+       现在只认「当前会话 follow 流」+ 小帧 + 之后真的静止 + 页面没有停止按钮。 */
+    var followStreams = {};        // streamId -> sessionId（session/follow 开的流）
+    var currentSession = '';
+    var hasFollowStream = false;
+    var turnStartAt = {};          // streamId -> 最近一次 turn/start 时间
+    var lastFrameAt = 0;           // 最近一次「有内容」的帧时间
+    var lastNotifyAt = 0;
+    var pendingTimer = null;
+    var loadedAt = Date.now();
+
+    var SNAPSHOT_BYTES = 16384;    // 超过这个大小的帧基本是快照/历史批量
+    var QUIET_MS = 2600;           // turn/end 之后要静止多久才算真结束
+    var COOLDOWN_MS = 15000;
+
+    function noteContentFrame(size) {
+      // 小控制帧（心跳之类）不参与「静默」判定
+      if (size >= 300) lastFrameAt = Date.now();
+    }
+
+    function isGenerating() {
+      try {
+        var els = document.querySelectorAll(
+          '[aria-label*="停止"],[aria-label*="Stop"],[aria-label*="stop"],' +
+          '[title*="停止"],[title*="Stop"],[data-testid*="stop"],[class*="stopButton"]'
+        );
+        for (var i = 0; i < els.length; i++) {
+          var el = els[i];
+          var r = el.getBoundingClientRect();
+          if (r.width > 0 && r.height > 0) return true;
+        }
+      } catch (e) { /* ignore */ }
+      return false;
+    }
+
+    function fireNotify() {
       var now = Date.now();
-      if (now - loadedAt < 20000) return;      // 首屏快照里的历史 turn/end
-      if (now - lastEndAt < 4000) return;      // 去重
-      lastEndAt = now;
+      if (now - loadedAt < 25000) return;
+      if (now - lastNotifyAt < COOLDOWN_MS) return;
+      if (now - lastFrameAt < QUIET_MS) return;   // 还在流
+      if (isGenerating()) return;                 // 页面上还有停止按钮
+      lastNotifyAt = now;
       var b = bridge();
       if (!b) return;
       try { b.onTurnEnd(String(document.title || '')); } catch (e) { /* ignore */ }
     }
 
-    function hasTurnEnd(u8) {
-      var n = NEEDLE.length;
+    function onTurnEnd(size) {
+      if (size > SNAPSHOT_BYTES) return;          // 快照 / 历史批量
+      if (pendingTimer) clearTimeout(pendingTimer);
+      pendingTimer = setTimeout(function () {
+        pendingTimer = null;
+        fireNotify();
+      }, QUIET_MS + 400);
+    }
+
+    function trackClientFrame(raw) {
+      // 只关心「开一条会话订阅」的帧，用来建立 streamId → sessionId 的映射
+      if (typeof raw !== 'string' || raw.length < 40) return;
+      if (raw.indexOf('session/follow') === -1) return;
+      if (raw.indexOf('"open"') === -1) return;
+      var obj;
+      try { obj = JSON.parse(raw); } catch (e) { return; }
+      if (!obj || obj.type !== 'open' || !obj.streamId) return;
+      var args = obj.payload && obj.payload.args;
+      var req = args && args.request;
+      var addr = req && req.address;
+      var sid = addr && (addr.sessionId || addr.id);
+      followStreams[obj.streamId] = sid || '';
+      hasFollowStream = true;
+      if (sid) currentSession = sid;
+    }
+
+    function handleFrameText(text) {
+      if (!text) return;
+      noteContentFrame(text.length);
+      // 99% 的帧在这里就返回了：一次 indexOf，不做任何解析
+      if (text.indexOf('"turn/') === -1) return;
+      var obj;
+      try { obj = JSON.parse(text); } catch (e) { return; }
+      if (!obj || obj.type !== 'item') return;
+      var v = obj.value;
+      if (!v || typeof v.type !== 'string') return;
+      var isTurnStart = v.type === 'turn/start';
+      var isTurnEnd = v.type === 'turn/end';
+      if (!isTurnStart && !isTurnEnd) return;
+
+      var sid = followStreams[obj.streamId];
+      if (hasFollowStream) {
+        // 认不出映射的流（比如 $events 全局流）一律不算：那会把别的会话、
+        // 子代理的回合结束当成「你的任务完成了」。
+        if (sid === undefined) return;
+        if (currentSession && sid && sid !== currentSession) return;
+      }
+
+      if (isTurnStart) {
+        turnStartAt[obj.streamId] = Date.now();
+        if (pendingTimer) { clearTimeout(pendingTimer); pendingTimer = null; }
+      } else {
+        var started = turnStartAt[obj.streamId] || 0;
+        if (!started || Date.now() - started < 400) return;
+        onTurnEnd(text.length);
+      }
+    }
+
+    var NEEDLE_TURN = new Uint8Array([0x22, 0x74, 0x75, 0x72, 0x6e, 0x2f]); // "turn/
+
+    function containsBytes(u8, needle) {
+      var n = needle.length;
       var last = u8.length - n;
       if (last < 0) return false;
-      var first = NEEDLE[0];
+      var first = needle[0];
       var i = u8.indexOf(first);
       while (i !== -1 && i <= last) {
         var ok = true;
         for (var k = 1; k < n; k++) {
-          if (u8[i + k] !== NEEDLE[k]) { ok = false; break; }
+          if (u8[i + k] !== needle[k]) { ok = false; break; }
         }
         if (ok) return true;
         i = u8.indexOf(first, i + 1);
@@ -280,73 +406,83 @@
       return false;
     }
 
-    function inspect(data) {
+    function handleFrameData(data) {
       if (data === null || data === undefined) return;
       if (typeof data === 'string') {
-        if (data.length > 8 && data.indexOf('turn/end') !== -1) fireTurnEnd();
+        handleFrameText(data);
         return;
       }
       if (data instanceof ArrayBuffer) {
-        // 纯字节扫描：不解码、不建字符串，流式帧也不会拖慢主线程
-        try { if (hasTurnEnd(new Uint8Array(data))) fireTurnEnd(); } catch (e) { /* ignore */ }
+        try {
+          var u8 = new Uint8Array(data);
+          noteContentFrame(u8.length);
+          if (!containsBytes(u8, NEEDLE_TURN)) return;
+          handleFrameText(new TextDecoder('utf-8').decode(u8));
+        } catch (e) { /* ignore */ }
         return;
       }
-      // Blob 帧（少见）：异步读字节，超大帧直接跳过
       try {
-        if (data && typeof data.arrayBuffer === 'function' && (data.size || 0) < 2097152) {
-          data.arrayBuffer().then(function (buf) {
-            try { if (hasTurnEnd(new Uint8Array(buf))) fireTurnEnd(); } catch (e) { /* ignore */ }
-          }).catch(function () {});
+        if (data && typeof data.text === 'function' && (data.size || 0) < 524288) {
+          data.text().then(handleFrameText).catch(function () {});
         }
       } catch (e) { /* ignore */ }
     }
 
+    var wsPatched = false;
+
     function hookWebSocket() {
       var Native = W.WebSocket;
-      if (!Native || Native.__dshPocketHooked) return;
-
-      function Patched(url, protocols) {
-        var ws = protocols === undefined ? new Native(url) : new Native(url, protocols);
-        try {
-          ws.addEventListener('message', function (ev) {
-            inspect(ev && ev.data);
-          });
-        } catch (e) { /* ignore */ }
-        return ws;
-      }
-
+      if (!Native || wsPatched) return;
       try {
+        // 1) 记录客户端发出的 session/follow（建流帧很小、频率极低）
+        var proto = Native.prototype;
+        var nativeSend = proto.send;
+        if (typeof nativeSend === 'function') {
+          proto.send = function (data) {
+            try { trackClientFrame(data); } catch (e) { /* ignore */ }
+            return nativeSend.apply(this, arguments);
+          };
+        }
+
+        // 2) 收帧
+        function Patched(url, protocols) {
+          var ws = protocols === undefined ? new Native(url) : new Native(url, protocols);
+          try {
+            ws.addEventListener('message', function (ev) {
+              handleFrameData(ev && ev.data);
+            });
+          } catch (e) { /* ignore */ }
+          return ws;
+        }
+
         Patched.prototype = Native.prototype;
         Patched.CONNECTING = Native.CONNECTING;
         Patched.OPEN = Native.OPEN;
         Patched.CLOSING = Native.CLOSING;
         Patched.CLOSED = Native.CLOSED;
-        Patched.__dshPocketHooked = true;
         W.WebSocket = Patched;
+        wsPatched = true;
       } catch (e) { /* ignore */ }
     }
 
-    /* ================= 3. Enter = 换行，不发送 ================= */
-    /* 页面自己在 keydown 里把 Enter 当发送；我们在 document 捕获阶段截住，
-       但不 preventDefault —— 浏览器默认的「插入换行」照常发生。
-       带修饰键（Shift/Ctrl/Alt/Cmd）与输入法组词中的 Enter 一律放行。 */
+    /* ================= 4. Enter = 换行 ================= */
     function hookEnterAsNewline() {
       document.addEventListener('keydown', function (e) {
         try {
-          var isEnter = e.key === 'Enter' || e.keyCode === 13;
-          if (!isEnter) return;
-          if (e.isComposing || e.keyCode === 229) return;   // 中文输入法组词中
+          if (e.keyCode !== 13 && e.key !== 'Enter') return;
+          if (e.isComposing || e.keyCode === 229) return;
           if (e.shiftKey || e.ctrlKey || e.altKey || e.metaKey) return;
           var t = e.target;
           if (!t) return;
-          var multiline = t.tagName === 'TEXTAREA' || t.isContentEditable === true;
-          if (!multiline) return;
+          if (t.tagName !== 'TEXTAREA' && t.isContentEditable !== true) return;
+          // 截住页面把 Enter 当发送的处理，但不 preventDefault ——
+          // 浏览器默认的「插入换行」照常发生。
           e.stopImmediatePropagation();
         } catch (err) { /* ignore */ }
       }, true);
     }
 
-    /* ================= 4. 记住手输的密码 ================= */
+    /* ================= 5. 记住手输的密码 ================= */
     function hookPinForm() {
       document.addEventListener('submit', function (ev) {
         try {
@@ -361,8 +497,8 @@
       }, true);
     }
 
-    /* ================= 5. 极小 CSS ================= */
-    function injectCss() {
+    /* ================= 6. 极小 CSS ================= */
+    function injectBaseCss() {
       try {
         if (document.getElementById('dshpocket-base-css')) return;
         var el = document.createElement('style');
@@ -381,17 +517,22 @@
     hookWebSocket();
     hookEnterAsNewline();
     hookPinForm();
-    injectCss();
+    injectBaseCss();
     watchTheme();
 
     document.addEventListener('DOMContentLoaded', function () {
-      injectCss();
+      injectBaseCss();
+      injectPerfCss();
       reportBg();
       watchTheme();
     }, { once: true });
 
-    window.addEventListener('load', reportBg, { once: true });
-    setTimeout(reportBg, 400);
-    setTimeout(reportBg, 1500);
+    window.addEventListener('load', function () {
+      injectPerfCss();
+      reportBg();
+    }, { once: true });
+
+    setTimeout(function () { injectPerfCss(); reportBg(); }, 400);
+    setTimeout(function () { injectPerfCss(); reportBg(); }, 1600);
   } catch (e) { /* 注入失败也不能影响页面 */ }
 })();
