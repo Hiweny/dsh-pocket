@@ -35,6 +35,9 @@
   var enabled = false;
   var DEBUG = false;
 
+  var IS_IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+
   function log() {
     if (!DEBUG) return;
     try { console.log.apply(console, ['[dsh-pocket]'].concat([].slice.call(arguments))); } catch (e) { /* ignore */ }
@@ -66,6 +69,7 @@
     injectCss();
     syncViewport(true);
     patchViewportMeta();
+    patchAppleMeta();
     hookViewport();
     installFullscreenTap();
     maybeAskNotifyPermission();
@@ -88,6 +92,31 @@
       meta.setAttribute('content', content + ', interactive-widget=resizes-content');
       log('viewport meta patched');
     } catch (e) { /* ignore */ }
+  }
+
+  function ensureMeta(name, value) {
+    try {
+      var el = D.querySelector('meta[name="' + name + '"]');
+      if (!el) {
+        el = D.createElement('meta');
+        el.setAttribute('name', name);
+        (D.head || D.documentElement).appendChild(el);
+      }
+      el.setAttribute('content', value);
+    } catch (e) { /* ignore */ }
+  }
+
+  /* iOS 上「添加到主屏幕」是否以独立窗口打开，取决于这几个 meta
+     （Safari 在 http 页面上不一定读 manifest，meta 更稳）。 */
+  function patchAppleMeta() {
+    if (!IS_IOS) return;
+    ensureMeta('apple-mobile-web-app-capable', 'yes');
+    ensureMeta('mobile-web-app-capable', 'yes');
+    ensureMeta('apple-mobile-web-app-title', 'DSH');
+    // default 而不是 black-translucent：后者会让内容钻到状态栏下面，
+    // 而 DSH 自己没做 safe-area 内边距，会遮住顶部标题。
+    ensureMeta('apple-mobile-web-app-status-bar-style', 'default');
+    log('apple meta patched');
   }
 
   function viewportFixNeeded() {
@@ -465,17 +494,28 @@
 
   function installFullscreenTap() {
     if (isStandalone()) return;
+    if (IS_IOS) return;   // iPhone/iPad 的 Safari、Edge 都不支持元素全屏，别白试
     if (!D.documentElement.requestFullscreen) return;
     if (sessionStorage.getItem('dsh-fs-tried')) return;
-    var onTap = function () {
+
+    var onTap = function (e) {
+      // 点在输入框/按钮上时不要抢全屏 —— 那会顺带收起键盘或打断点击
+      var t = e && e.target;
+      try {
+        if (t && t.closest &&
+          t.closest('input,textarea,button,a,select,[role="button"],[contenteditable="true"]')) {
+          return;
+        }
+      } catch (err) { /* ignore */ }
+
       D.removeEventListener('pointerdown', onTap, true);
-      try { sessionStorage.setItem('dsh-fs-tried', '1'); } catch (e) { /* ignore */ }
+      try { sessionStorage.setItem('dsh-fs-tried', '1'); } catch (err) { /* ignore */ }
       if (D.fullscreenElement) return;
       setTimeout(function () {
         try {
           var p = D.documentElement.requestFullscreen({ navigationUI: 'hide' });
           if (p && p.catch) p.catch(function () { /* 被拒就算了 */ });
-        } catch (e) { /* ignore */ }
+        } catch (err) { /* ignore */ }
       }, 0);
     };
     D.addEventListener('pointerdown', onTap, true);
